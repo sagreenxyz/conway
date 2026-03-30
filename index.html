@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conway's Game of Life</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      height: 100dvh;
+      width: 100dvw;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── toolbar ─────────────────────────────────────────── */
+    #toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+      background: rgba(20,20,20,0.92);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid #333;
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    #toolbar label { font-size: 0.8rem; color: #aaa; }
+
+    #toolbar input[type="text"] {
+      width: 110px;
+      padding: 4px 8px;
+      background: #1e1e1e;
+      border: 1px solid #444;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 0.85rem;
+    }
+
+    #toolbar input[type="text"]:focus { outline: none; border-color: #4af; }
+
+    button {
+      padding: 5px 14px;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #2a2a2a;
+      color: #ddd;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    button:hover { background: #3a3a3a; color: #fff; }
+    button.active { background: #1a5fa8; border-color: #4af; color: #fff; }
+
+    #speedLabel { font-size: 0.8rem; color: #aaa; white-space: nowrap; }
+
+    input[type="range"] {
+      width: 100px;
+      accent-color: #4af;
+      cursor: pointer;
+    }
+
+    #ruleError {
+      font-size: 0.75rem;
+      color: #f66;
+      display: none;
+    }
+
+    #generationCount {
+      margin-left: auto;
+      font-size: 0.78rem;
+      color: #888;
+      white-space: nowrap;
+    }
+
+    /* ── canvas ──────────────────────────────────────────── */
+    #canvas {
+      display: block;
+      flex: 1 1 auto;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    /* ── preset chips ────────────────────────────────────── */
+    .presets {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .preset-btn {
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-color: #444;
+    }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+
+  <!-- Rule input -->
+  <label for="ruleInput">Rule&nbsp;</label>
+  <input id="ruleInput" type="text" value="B3/S23" maxlength="20"
+         title="Enter a Life-like rule in B…/S… notation, e.g. B3/S23" />
+  <button id="applyRule">Apply</button>
+  <span id="ruleError">Invalid rule</span>
+
+  <!-- Presets -->
+  <div class="presets">
+    <button class="preset-btn" data-rule="B3/S23"  title="Conway's Life">Life</button>
+    <button class="preset-btn" data-rule="B36/S23" title="HighLife">HighLife</button>
+    <button class="preset-btn" data-rule="B3/S12345" title="Maze">Maze</button>
+    <button class="preset-btn" data-rule="B3/S13"  title="B3/S13">B3/S13</button>
+    <button class="preset-btn" data-rule="B1/S1"   title="Gnarl">Gnarl</button>
+    <button class="preset-btn" data-rule="B368/S245" title="Morley">Morley</button>
+  </div>
+
+  <!-- Controls -->
+  <button id="playPause">⏸ Pause</button>
+  <button id="stepBtn">Step</button>
+  <button id="randomBtn">Randomize</button>
+  <button id="clearBtn">Clear</button>
+
+  <!-- Speed -->
+  <label id="speedLabel" for="speedSlider">Speed&nbsp;<span id="speedVal">10</span>&nbsp;fps</label>
+  <input id="speedSlider" type="range" min="1" max="60" value="10" />
+
+  <!-- Cell size -->
+  <label for="cellSize">Cell&nbsp;</label>
+  <input id="cellSize" type="range" min="4" max="24" value="10"
+         title="Cell size in pixels" style="width:70px;" />
+
+  <span id="generationCount">Gen: 0</span>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   Conway / Life-like Cellular Automaton — GitHub Pages
+   Supports full B/S notation: B3/S23, B36/S23, B3/S13, …
+   ═══════════════════════════════════════════════════════════ */
+
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const toolbar  = document.getElementById('toolbar');
+
+// ── State ────────────────────────────────────────────────
+let CELL = 10;                    // pixels per cell
+const CELL_GAP = 1;              // gap between cells (creates grid effect)
+const INITIAL_DENSITY = 0.3;     // probability a cell starts alive
+let cols, rows;
+let grid, nextGrid;               // Uint8Array flat arrays
+let running  = true;
+let fps      = 10;
+let generation = 0;
+
+// Default rule: Conway's Life B3/S23
+let birthSet    = new Set([3]);
+let survivalSet = new Set([2, 3]);
+
+// ── Rule parsing ─────────────────────────────────────────
+function parseRule(str) {
+  // Accept both "B3/S23" and "b3/s23"
+  const m = str.trim().toUpperCase().match(/^B([0-8]*)\/S([0-8]*)$/);
+  if (!m) return null;
+  return {
+    birth:    new Set(m[1].split('').map(Number)),
+    survival: new Set(m[2].split('').map(Number))
+  };
+}
+
+function applyRuleString(str) {
+  const result = parseRule(str);
+  const errEl  = document.getElementById('ruleError');
+  if (!result) { errEl.style.display = 'inline'; return false; }
+  errEl.style.display = 'none';
+  birthSet    = result.birth;
+  survivalSet = result.survival;
+  document.getElementById('ruleInput').value = str.trim().toUpperCase();
+  return true;
+}
+
+// ── Grid helpers ─────────────────────────────────────────
+function makeGrid() { return new Uint8Array(cols * rows); }
+function idx(c, r)  { return r * cols + c; }
+
+function randomize() {
+  for (let i = 0; i < grid.length; i++) grid[i] = Math.random() < INITIAL_DENSITY ? 1 : 0;
+  generation = 0;
+  updateGenDisplay();
+}
+
+function clearGrid() {
+  grid.fill(0);
+  generation = 0;
+  updateGenDisplay();
+}
+
+function resize() {
+  const toolH = toolbar.getBoundingClientRect().height;
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight - toolH;
+
+  const newCols = Math.floor(canvas.width  / CELL);
+  const newRows = Math.floor(canvas.height / CELL);
+
+  const newGrid = new Uint8Array(newCols * newRows);
+  // Copy old grid into new one (centred)
+  const offC = Math.floor((newCols - cols) / 2);
+  const offR = Math.floor((newRows - rows) / 2);
+  if (grid) {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const nr = r + offR, nc = c + offC;
+        if (nr >= 0 && nr < newRows && nc >= 0 && nc < newCols) {
+          newGrid[nr * newCols + nc] = grid[idx(c, r)];
+        }
+      }
+    }
+  }
+  cols = newCols; rows = newRows;
+  grid     = newGrid;
+  nextGrid = new Uint8Array(cols * rows);
+}
+
+// ── Simulation step ──────────────────────────────────────
+function step() {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      let n = 0;
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          // Wrap around (toroidal)
+          const nr = (r + dr + rows) % rows;
+          const nc = (c + dc + cols) % cols;
+          n += grid[idx(nc, nr)];
+        }
+      }
+      const alive = grid[idx(c, r)];
+      nextGrid[idx(c, r)] = alive
+        ? (survivalSet.has(n) ? 1 : 0)
+        : (birthSet.has(n)    ? 1 : 0);
+    }
+  }
+  // Swap buffers
+  [grid, nextGrid] = [nextGrid, grid];
+  generation++;
+  updateGenDisplay();
+}
+
+// ── Rendering ────────────────────────────────────────────
+const ALIVE_COLOR = '#39ff14';   // neon green
+const DEAD_COLOR  = '#0a0a0a';
+
+function draw() {
+  ctx.fillStyle = DEAD_COLOR;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = ALIVE_COLOR;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (grid[idx(c, r)]) {
+        ctx.fillRect(c * CELL, r * CELL, CELL - CELL_GAP, CELL - CELL_GAP);
+      }
+    }
+  }
+}
+
+// ── Main loop ────────────────────────────────────────────
+let lastTime = 0;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (running && ts - lastTime >= 1000 / fps) {
+    step();
+    lastTime = ts;
+  }
+  draw();
+}
+
+// ── UI helpers ───────────────────────────────────────────
+function updateGenDisplay() {
+  document.getElementById('generationCount').textContent = `Gen: ${generation}`;
+}
+
+// ── Mouse / touch drawing ────────────────────────────────
+let isPainting  = false;
+let paintValue  = 1;
+
+function cellAt(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX ?? e.touches[0].clientX) - rect.left;
+  const y = (e.clientY ?? e.touches[0].clientY) - rect.top;
+  return { c: Math.floor(x / CELL), r: Math.floor(y / CELL) };
+}
+
+function paint(e) {
+  const { c, r } = cellAt(e);
+  if (c >= 0 && c < cols && r >= 0 && r < rows) {
+    grid[idx(c, r)] = paintValue;
+  }
+}
+
+canvas.addEventListener('mousedown', e => {
+  const { c, r } = cellAt(e);
+  if (c >= 0 && c < cols && r >= 0 && r < rows) {
+    paintValue = grid[idx(c, r)] ? 0 : 1;
+    isPainting = true;
+    paint(e);
+  }
+});
+canvas.addEventListener('mousemove', e => { if (isPainting) paint(e); });
+canvas.addEventListener('mouseup',   () => { isPainting = false; });
+canvas.addEventListener('mouseleave',() => { isPainting = false; });
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const { c, r } = cellAt(e);
+  if (c >= 0 && c < cols && r >= 0 && r < rows) {
+    paintValue = grid[idx(c, r)] ? 0 : 1;
+    isPainting = true;
+    paint(e);
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (isPainting) paint(e);
+}, { passive: false });
+canvas.addEventListener('touchend', () => { isPainting = false; });
+
+// ── Toolbar events ───────────────────────────────────────
+document.getElementById('applyRule').addEventListener('click', () => {
+  const str = document.getElementById('ruleInput').value;
+  if (applyRuleString(str)) { clearGrid(); randomize(); }
+});
+
+document.getElementById('ruleInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('applyRule').click();
+});
+
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const rule = btn.dataset.rule;
+    if (applyRuleString(rule)) { clearGrid(); randomize(); }
+  });
+});
+
+const playPauseBtn = document.getElementById('playPause');
+playPauseBtn.addEventListener('click', () => {
+  running = !running;
+  playPauseBtn.textContent = running ? '⏸ Pause' : '▶ Play';
+  playPauseBtn.classList.toggle('active', !running);
+});
+
+document.getElementById('stepBtn').addEventListener('click', () => {
+  if (running) { running = false; playPauseBtn.textContent = '▶ Play'; playPauseBtn.classList.add('active'); }
+  step();
+  draw();
+});
+
+document.getElementById('randomBtn').addEventListener('click', randomize);
+document.getElementById('clearBtn').addEventListener('click', clearGrid);
+
+document.getElementById('speedSlider').addEventListener('input', e => {
+  fps = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = fps;
+});
+
+document.getElementById('cellSize').addEventListener('change', e => {
+  CELL = parseInt(e.target.value);
+  resize();
+});
+
+window.addEventListener('resize', resize);
+
+// ── Boot ─────────────────────────────────────────────────
+resize();
+randomize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
